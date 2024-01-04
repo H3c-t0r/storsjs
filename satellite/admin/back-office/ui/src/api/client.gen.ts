@@ -4,9 +4,53 @@
 import { HttpClient } from '@/utils/httpClient';
 import { Time, UUID } from '@/types/common';
 
+export class AccountFlags {
+    create: boolean;
+    delete: boolean;
+    history: boolean;
+    list: boolean;
+    projects: boolean;
+    suspend: boolean;
+    unsusped: boolean;
+    resetMFA: boolean;
+    update: boolean;
+    view: boolean;
+}
+
+export class BucketFlags {
+    create: boolean;
+    delete: boolean;
+    history: boolean;
+    list: boolean;
+    update: boolean;
+    view: boolean;
+}
+
+export class FeatureFlags {
+    account: AccountFlags;
+    project: ProjectFlags;
+    bucket: BucketFlags;
+    dashboard: boolean;
+    operator: boolean;
+    singOut: boolean;
+    switchSatellite: boolean;
+}
+
 export class PlacementInfo {
     id: number;
     location: string;
+}
+
+export class ProjectFlags {
+    create: boolean;
+    delete: boolean;
+    history: boolean;
+    list: boolean;
+    update: boolean;
+    view: boolean;
+    memberList: boolean;
+    memberAdd: boolean;
+    memberRemove: boolean;
 }
 
 export class ProjectUsageLimits {
@@ -18,6 +62,14 @@ export class ProjectUsageLimits {
     bandwidthUsed: number;
     segmentLimit: number;
     segmentUsed: number | null;
+}
+
+export class Settings {
+    admin: SettingsAdmin;
+}
+
+export class SettingsAdmin {
+    features: FeatureFlags;
 }
 
 export class User {
@@ -38,6 +90,21 @@ class APIError extends Error {
         public readonly responseStatusCode?: number,
     ) {
         super(msg);
+    }
+}
+
+export class SettingsHttpApiV1 {
+    private readonly http: HttpClient = new HttpClient();
+    private readonly ROOT_PATH: string = '/back-office/api/v1/settings';
+
+    public async get(): Promise<Settings> {
+        const fullPath = `${this.ROOT_PATH}/`;
+        const response = await this.http.get(fullPath);
+        if (response.ok) {
+            return response.json().then((body) => body as Settings);
+        }
+        const err = await response.json();
+        throw new APIError(err.error, response.status);
     }
 }
 

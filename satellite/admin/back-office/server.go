@@ -84,6 +84,7 @@ func NewServer(
 	// API generator already add the PathPrefix.
 	NewPlacementManagement(log, mon, service, root)
 	NewUserManagement(log, mon, service, root, auth)
+	NewSettings(log, mon, service, root)
 
 	root = root.PathPrefix(PathPrefix).Subrouter()
 	// Static assets for the web interface.
