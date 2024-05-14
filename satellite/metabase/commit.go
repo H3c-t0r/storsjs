@@ -477,6 +477,8 @@ type CommitSegment struct {
 	Pieces Pieces
 
 	Placement storj.PlacementConstraint
+
+	MultipartUpload bool
 }
 
 // CommitSegment commits segment to the database.
@@ -535,8 +537,9 @@ func (db *DB) CommitSegment(ctx context.Context, opts CommitSegment) (err error)
 func (p *PostgresAdapter) CommitPendingObjectSegment(ctx context.Context, opts CommitSegment, aliasPieces AliasPieces) (err error) {
 	defer mon.Task()(&ctx)(&err)
 
-	// Verify that object exists and is partial.
-	_, err = p.db.ExecContext(ctx, `
+	if opts.MultipartUpload {
+		// Verify that object exists and is partial.
+		_, err = p.db.ExecContext(ctx, `
 		INSERT INTO segments (
 			stream_id, position, expires_at,
 			root_piece_id, encrypted_key_nonce, encrypted_key,
@@ -566,16 +569,54 @@ func (p *PostgresAdapter) CommitPendingObjectSegment(ctx context.Context, opts C
 			remote_alias_pieces = $11,
 			placement = $17
 		`, opts.Position, opts.ExpiresAt,
-		opts.RootPieceID, opts.EncryptedKeyNonce, opts.EncryptedKey,
-		opts.EncryptedSize, opts.PlainOffset, opts.PlainSize, opts.EncryptedETag,
-		redundancyScheme{&opts.Redundancy},
-		aliasPieces,
-		opts.ProjectID, []byte(opts.BucketName), opts.ObjectKey, opts.Version, opts.StreamID,
-		opts.Placement,
-	)
-	if err != nil {
-		if code := pgerrcode.FromError(err); code == pgxerrcode.NotNullViolation {
-			return ErrPendingObjectMissing.New("")
+			opts.RootPieceID, opts.EncryptedKeyNonce, opts.EncryptedKey,
+			opts.EncryptedSize, opts.PlainOffset, opts.PlainSize, opts.EncryptedETag,
+			redundancyScheme{&opts.Redundancy},
+			aliasPieces,
+			opts.ProjectID, []byte(opts.BucketName), opts.ObjectKey, opts.Version, opts.StreamID,
+			opts.Placement,
+		)
+		if err != nil {
+			if code := pgerrcode.FromError(err); code == pgxerrcode.NotNullViolation {
+				return ErrPendingObjectMissing.New("")
+			}
+		}
+	} else {
+		_, err = p.db.ExecContext(ctx, `
+			INSERT INTO segments (
+				stream_id, position, expires_at,
+				root_piece_id, encrypted_key_nonce, encrypted_key,
+				encrypted_size, plain_offset, plain_size, encrypted_etag,
+				redundancy,
+				remote_alias_pieces,
+				placement
+			) VALUES (
+				$1, $2, $3,
+				$4, $5, $6,
+				$7, $8, $9, $10,
+				$11,
+				$12,
+				$13
+			)
+			ON CONFLICT(stream_id, position)
+			DO UPDATE SET
+				expires_at = $3,
+				root_piece_id = $4, encrypted_key_nonce = $5, encrypted_key = $6,
+				encrypted_size = $7, plain_offset = $8, plain_size = $9, encrypted_etag = $10,
+				redundancy = $11,
+				remote_alias_pieces = $12,
+				placement = $13
+		`, opts.StreamID, opts.Position, opts.ExpiresAt,
+			opts.RootPieceID, opts.EncryptedKeyNonce, opts.EncryptedKey,
+			opts.EncryptedSize, opts.PlainOffset, opts.PlainSize, opts.EncryptedETag,
+			redundancyScheme{&opts.Redundancy},
+			aliasPieces,
+			opts.Placement,
+		)
+		if err != nil {
+			if code := pgerrcode.FromError(err); code == pgxerrcode.NotNullViolation {
+				return ErrPendingObjectMissing.New("")
+			}
 		}
 	}
 	return err
@@ -585,8 +626,9 @@ func (p *PostgresAdapter) CommitPendingObjectSegment(ctx context.Context, opts C
 func (p *CockroachAdapter) CommitPendingObjectSegment(ctx context.Context, opts CommitSegment, aliasPieces AliasPieces) (err error) {
 	defer mon.Task()(&ctx)(&err)
 
-	// Verify that object exists and is partial.
-	_, err = p.db.ExecContext(ctx, `
+	if opts.MultipartUpload {
+		// Verify that object exists and is partial.
+		_, err = p.db.ExecContext(ctx, `
 			UPSERT INTO segments (
 				stream_id, position,
 				expires_at, root_piece_id, encrypted_key_nonce, encrypted_key,
@@ -607,16 +649,45 @@ func (p *CockroachAdapter) CommitPendingObjectSegment(ctx context.Context, opts 
 				$11,
 				$17
 			)`, opts.Position, opts.ExpiresAt,
-		opts.RootPieceID, opts.EncryptedKeyNonce, opts.EncryptedKey,
-		opts.EncryptedSize, opts.PlainOffset, opts.PlainSize, opts.EncryptedETag,
-		redundancyScheme{&opts.Redundancy},
-		aliasPieces,
-		opts.ProjectID, []byte(opts.BucketName), opts.ObjectKey, opts.Version, opts.StreamID,
-		opts.Placement,
-	)
-	if err != nil {
-		if code := pgerrcode.FromError(err); code == pgxerrcode.NotNullViolation {
-			return ErrPendingObjectMissing.New("")
+			opts.RootPieceID, opts.EncryptedKeyNonce, opts.EncryptedKey,
+			opts.EncryptedSize, opts.PlainOffset, opts.PlainSize, opts.EncryptedETag,
+			redundancyScheme{&opts.Redundancy},
+			aliasPieces,
+			opts.ProjectID, []byte(opts.BucketName), opts.ObjectKey, opts.Version, opts.StreamID,
+			opts.Placement,
+		)
+		if err != nil {
+			if code := pgerrcode.FromError(err); code == pgxerrcode.NotNullViolation {
+				return ErrPendingObjectMissing.New("")
+			}
+		}
+	} else {
+		_, err = p.db.ExecContext(ctx, `
+			UPSERT INTO segments (
+				stream_id, position,
+				expires_at, root_piece_id, encrypted_key_nonce, encrypted_key,
+				encrypted_size, plain_offset, plain_size, encrypted_etag,
+				redundancy,
+				remote_alias_pieces,
+				placement
+			) VALUES (
+				$1, $2,
+				$3, $4, $5, $6,
+				$7, $8, $9, $10,
+				$11,
+				$12,
+				$13
+			)`, opts.StreamID, opts.Position, opts.ExpiresAt,
+			opts.RootPieceID, opts.EncryptedKeyNonce, opts.EncryptedKey,
+			opts.EncryptedSize, opts.PlainOffset, opts.PlainSize, opts.EncryptedETag,
+			redundancyScheme{&opts.Redundancy},
+			aliasPieces,
+			opts.Placement,
+		)
+		if err != nil {
+			if code := pgerrcode.FromError(err); code == pgxerrcode.NotNullViolation {
+				return ErrPendingObjectMissing.New("")
+			}
 		}
 	}
 	return err
@@ -643,6 +714,8 @@ type CommitInlineSegment struct {
 	EncryptedETag []byte
 
 	InlineData []byte
+
+	MultipartUpload bool
 }
 
 // CommitInlineSegment commits inline segment to the database.
@@ -682,7 +755,8 @@ func (db *DB) CommitInlineSegment(ctx context.Context, opts CommitInlineSegment)
 
 // CommitInlineSegment commits inline segment to the database.
 func (p *PostgresAdapter) CommitInlineSegment(ctx context.Context, opts CommitInlineSegment) (err error) {
-	_, err = p.db.ExecContext(ctx, `
+	if opts.MultipartUpload {
+		_, err = p.db.ExecContext(ctx, `
 			INSERT INTO segments (
 				stream_id, position, expires_at,
 				root_piece_id, encrypted_key_nonce, encrypted_key,
@@ -707,14 +781,37 @@ func (p *PostgresAdapter) CommitInlineSegment(ctx context.Context, opts CommitIn
 				encrypted_size = $6, plain_offset = $7, plain_size = $8, encrypted_etag = $9,
 				inline_data = $10
 		`, opts.Position, opts.ExpiresAt,
-		storj.PieceID{}, opts.EncryptedKeyNonce, opts.EncryptedKey,
-		len(opts.InlineData), opts.PlainOffset, opts.PlainSize, opts.EncryptedETag,
-		opts.InlineData,
-		opts.ProjectID, []byte(opts.BucketName), opts.ObjectKey, opts.Version, opts.StreamID,
-	)
-	if err != nil {
-		if code := pgerrcode.FromError(err); code == pgxerrcode.NotNullViolation {
-			return ErrPendingObjectMissing.New("")
+			storj.PieceID{}, opts.EncryptedKeyNonce, opts.EncryptedKey,
+			len(opts.InlineData), opts.PlainOffset, opts.PlainSize, opts.EncryptedETag,
+			opts.InlineData,
+			opts.ProjectID, []byte(opts.BucketName), opts.ObjectKey, opts.Version, opts.StreamID,
+		)
+		if err != nil {
+			if code := pgerrcode.FromError(err); code == pgxerrcode.NotNullViolation {
+				return ErrPendingObjectMissing.New("")
+			}
+		}
+	} else {
+		_, err = p.db.ExecContext(ctx, `
+			UPSERT INTO segments (
+				stream_id, position, expires_at,
+				root_piece_id, encrypted_key_nonce, encrypted_key,
+				encrypted_size, plain_offset, plain_size, encrypted_etag,
+				inline_data
+			) VALUES (
+				$1, $2, $3,
+				$4, $5, $6,
+				$7, $8, $9, $10,
+				$11
+			)`, opts.StreamID, opts.Position, opts.ExpiresAt,
+			storj.PieceID{}, opts.EncryptedKeyNonce, opts.EncryptedKey,
+			len(opts.InlineData), opts.PlainOffset, opts.PlainSize, opts.EncryptedETag,
+			opts.InlineData,
+		)
+		if err != nil {
+			if code := pgerrcode.FromError(err); code == pgxerrcode.NotNullViolation {
+				return ErrPendingObjectMissing.New("")
+			}
 		}
 	}
 
@@ -731,6 +828,7 @@ type CommitObject struct {
 	ObjectStream
 
 	Encryption storj.EncryptionParameters
+	ExpiresAt  *time.Time
 
 	// this flag controls if we want to set metadata fields with CommitObject
 	// it's possible to set metadata with BeginObject request so we need to
@@ -745,6 +843,8 @@ type CommitObject struct {
 
 	// Versioned indicates whether an object is allowed to have multiple versions.
 	Versioned bool
+
+	MultipartUpload bool
 }
 
 // Verify verifies reqest fields.
@@ -879,6 +979,61 @@ func (db *DB) CommitObject(ctx context.Context, opts CommitObject) (object Objec
 func (ptx *postgresTransactionAdapter) finalizeObjectCommit(ctx context.Context, opts CommitObject, nextStatus ObjectStatus, nextVersion Version, finalSegments []segmentInfoForCommit, totalPlainSize int64, totalEncryptedSize int64, fixedSegmentSize int32, object *Object) (err error) {
 	defer mon.Task()(&ctx)(&err)
 
+	if !opts.MultipartUpload {
+		args := []interface{}{
+			opts.ProjectID, []byte(opts.BucketName), opts.ObjectKey, nextVersion, opts.StreamID,
+			opts.ExpiresAt,
+			nextStatus,
+			len(finalSegments),
+			totalPlainSize,
+			totalEncryptedSize,
+			fixedSegmentSize,
+			encryptionParameters{&opts.Encryption},
+		}
+
+		// args = append(args, )
+
+		metadataColumns := ""
+		metadataValues := ""
+		if opts.OverrideEncryptedMetadata {
+			args = append(args,
+				opts.EncryptedMetadataNonce,
+				opts.EncryptedMetadata,
+				opts.EncryptedMetadataEncryptedKey,
+			)
+			metadataColumns = ", encrypted_metadata_nonce, encrypted_metadata, encrypted_metadata_encrypted_key"
+			metadataValues = ", $13, $14, $15"
+		}
+
+		err = ptx.tx.QueryRowContext(ctx, `
+			INSERT INTO objects (
+				project_id, bucket_name, object_key, version, stream_id,
+				expires_at,
+				status, segment_count, total_plain_size, total_encrypted_size,
+				fixed_segment_size, zombie_deletion_deadline, encryption
+				`+metadataColumns+`
+			) VALUES (
+				$1, $2, $3, $4, $5,
+				$6,
+				$7, $8, $9, $10,
+				$11, NULL, $12
+				`+metadataValues+`
+			)
+			RETURNING
+				created_at, expires_at,
+				encrypted_metadata, encrypted_metadata_encrypted_key, encrypted_metadata_nonce,
+				encryption
+			`, args...).Scan(
+			&object.CreatedAt, &object.ExpiresAt,
+			&object.EncryptedMetadata, &object.EncryptedMetadataEncryptedKey, &object.EncryptedMetadataNonce,
+			encryptionParameters{&object.Encryption},
+		)
+		if err != nil {
+			return Error.New("failed to update object: %w", err)
+		}
+		return nil
+	}
+
 	args := []interface{}{
 		opts.ProjectID, []byte(opts.BucketName), opts.ObjectKey, opts.Version, opts.StreamID,
 		nextStatus,
@@ -905,30 +1060,30 @@ func (ptx *postgresTransactionAdapter) finalizeObjectCommit(ctx context.Context,
 			`
 	}
 	err = ptx.tx.QueryRowContext(ctx, `
-			UPDATE objects SET
-				version = $12,
-				status = $6,
-				segment_count = $7,
+		UPDATE objects SET
+			version = $12,
+			status = $6,
+			segment_count = $7,
 
-				total_plain_size     = $8,
-				total_encrypted_size = $9,
-				fixed_segment_size   = $10,
-				zombie_deletion_deadline = NULL,
+			total_plain_size     = $8,
+			total_encrypted_size = $9,
+			fixed_segment_size   = $10,
+			zombie_deletion_deadline = NULL,
 
-				-- TODO should we allow to override existing encryption parameters or return error if don't match with opts?
-				encryption = CASE
-					WHEN objects.encryption = 0 AND $11 <> 0 THEN $11
-					WHEN objects.encryption = 0 AND $11 = 0 THEN NULL
-					ELSE objects.encryption
-				END
-				`+metadataColumns+`
-			WHERE (project_id, bucket_name, object_key, version, stream_id) = ($1, $2, $3, $4, $5) AND
-				status       = `+statusPending+`
-			RETURNING
-				created_at, expires_at,
-				encrypted_metadata, encrypted_metadata_encrypted_key, encrypted_metadata_nonce,
-				encryption
-			`, args...).Scan(
+			-- TODO should we allow to override existing encryption parameters or return error if don't match with opts?
+			encryption = CASE
+				WHEN objects.encryption = 0 AND $11 <> 0 THEN $11
+				WHEN objects.encryption = 0 AND $11 = 0 THEN NULL
+				ELSE objects.encryption
+			END
+			`+metadataColumns+`
+		WHERE (project_id, bucket_name, object_key, version, stream_id) = ($1, $2, $3, $4, $5) AND
+			status       = `+statusPending+`
+		RETURNING
+			created_at, expires_at,
+			encrypted_metadata, encrypted_metadata_encrypted_key, encrypted_metadata_nonce,
+			encryption
+		`, args...).Scan(
 		&object.CreatedAt, &object.ExpiresAt,
 		&object.EncryptedMetadata, &object.EncryptedMetadataEncryptedKey, &object.EncryptedMetadataNonce,
 		encryptionParameters{&object.Encryption},

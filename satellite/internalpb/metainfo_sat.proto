@@ -31,6 +31,8 @@ message StreamID {
     int32 placement = 13;
 
     bool versioned = 15;
+
+    bool multipart_upload = 16;
 }
 
 message SegmentID {

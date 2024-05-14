@@ -508,21 +508,12 @@ func insertSegment(ctx context.Context, t *testing.T, planet *testplanet.Planet,
 		StreamID:   testrand.UUID(),
 	}
 
-	_, err := metabaseDB.TestingBeginObjectExactVersion(ctx, metabase.BeginObjectExactVersion{
-		ObjectStream: obj,
-		Encryption: storj.EncryptionParameters{
-			CipherSuite: storj.EncAESGCM,
-			BlockSize:   256,
-		},
-		ExpiresAt: expiresAt,
-	})
-	require.NoError(t, err)
-
 	rootPieceID := testrand.PieceID()
-	err = metabaseDB.BeginSegment(ctx, metabase.BeginSegment{
-		ObjectStream: obj,
-		RootPieceID:  rootPieceID,
-		Pieces:       pieces,
+	err := metabaseDB.BeginSegment(ctx, metabase.BeginSegment{
+		ObjectStream:        obj,
+		RootPieceID:         rootPieceID,
+		Pieces:              pieces,
+		ObjectExistsChecked: true,
 	})
 	require.NoError(t, err)
 

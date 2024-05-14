@@ -62,7 +62,8 @@ func CreateObject(ctx *testcontext.Context, t testing.TB, db *metabase.DB, obj m
 
 	return CommitObject{
 		Opts: metabase.CommitObject{
-			ObjectStream: obj,
+			ObjectStream:    obj,
+			MultipartUpload: true,
 		},
 	}.Check(ctx, t, db)
 }

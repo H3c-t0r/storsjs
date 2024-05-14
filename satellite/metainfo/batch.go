@@ -173,7 +173,10 @@ func (endpoint *Endpoint) Batch(ctx context.Context, req *pb.BatchRequest) (resp
 		// OBJECT
 		case *pb.BatchRequestItem_ObjectBegin:
 			singleRequest.ObjectBegin.Header = req.Header
-			response, err := endpoint.BeginObject(ctx, singleRequest.ObjectBegin)
+
+			multipartUpload := !(nextRequestSegmentBegin(i, req.Requests) || nextRequestSegmentMakeInline(i, req.Requests))
+
+			response, err := endpoint.beginObject(ctx, singleRequest.ObjectBegin, multipartUpload)
 			if err != nil {
 				return resp, err
 			}
@@ -305,13 +308,13 @@ func (endpoint *Endpoint) Batch(ctx context.Context, req *pb.BatchRequest) (resp
 		case *pb.BatchRequestItem_SegmentBegin:
 			singleRequest.SegmentBegin.Header = req.Header
 
-			justCreatedObject := false
+			multipartUpload := true
 			if singleRequest.SegmentBegin.StreamId.IsZero() && !lastStreamID.IsZero() {
 				singleRequest.SegmentBegin.StreamId = lastStreamID
-				justCreatedObject = true
+				multipartUpload = false
 			}
 
-			response, err := endpoint.beginSegment(ctx, singleRequest.SegmentBegin, justCreatedObject)
+			response, err := endpoint.beginSegment(ctx, singleRequest.SegmentBegin, multipartUpload)
 			if err != nil {
 				return resp, err
 			}
@@ -479,4 +482,24 @@ func (endpoint *Endpoint) shouldCombine(segmentIndex int32, reqIndex int, reques
 		return int64(segmentIndex) != streamMeta.NumberOfSegments-2
 	}
 	return false
+}
+
+func nextRequestSegmentBegin(index int, requests []*pb.BatchRequestItem) bool {
+	if index+1 >= len(requests) {
+		return false
+	}
+
+	request := requests[index+1]
+	_, ok := request.Request.(*pb.BatchRequestItem_SegmentBegin)
+	return ok
+}
+
+func nextRequestSegmentMakeInline(index int, requests []*pb.BatchRequestItem) bool {
+	if index+1 >= len(requests) {
+		return false
+	}
+
+	request := requests[index+1]
+	_, ok := request.Request.(*pb.BatchRequestItem_SegmentMakeInline)
+	return ok
 }

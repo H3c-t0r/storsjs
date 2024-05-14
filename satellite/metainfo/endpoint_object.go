@@ -30,6 +30,10 @@ import (
 
 // BeginObject begins object.
 func (endpoint *Endpoint) BeginObject(ctx context.Context, req *pb.ObjectBeginRequest) (resp *pb.ObjectBeginResponse, err error) {
+	return endpoint.beginObject(ctx, req, true)
+}
+
+func (endpoint *Endpoint) beginObject(ctx context.Context, req *pb.ObjectBeginRequest, multipartUpload bool) (resp *pb.ObjectBeginResponse, err error) {
 	defer mon.Task()(&ctx)(&err)
 
 	endpoint.versionCollector.collect(req.Header.UserAgent, mon.Func().ShortName())
@@ -137,27 +141,34 @@ func (endpoint *Endpoint) BeginObject(ctx context.Context, req *pb.ObjectBeginRe
 		nonce = req.EncryptedMetadataNonce[:]
 	}
 
-	opts := metabase.BeginObjectNextVersion{
+	object := metabase.Object{
 		ObjectStream: metabase.ObjectStream{
 			ProjectID:  keyInfo.ProjectID,
 			BucketName: string(req.Bucket),
 			ObjectKey:  metabase.ObjectKey(req.EncryptedObjectKey),
 			StreamID:   streamID,
-			Version:    metabase.NextVersion,
+			Version:    metabase.DefaultVersion,
 		},
-		Encryption: encryptionParameters,
-
-		EncryptedMetadata:             req.EncryptedMetadata,
-		EncryptedMetadataEncryptedKey: req.EncryptedMetadataEncryptedKey,
-		EncryptedMetadataNonce:        nonce,
+		CreatedAt: time.Now(),
 	}
-	if !expiresAt.IsZero() {
-		opts.ExpiresAt = &expiresAt
-	}
+	if multipartUpload {
+		object.ObjectStream.Version = metabase.NextVersion
+		opts := metabase.BeginObjectNextVersion{
+			ObjectStream: object.ObjectStream,
+			Encryption:   encryptionParameters,
 
-	object, err := endpoint.metabase.BeginObjectNextVersion(ctx, opts)
-	if err != nil {
-		return nil, endpoint.convertMetabaseErr(err)
+			EncryptedMetadata:             req.EncryptedMetadata,
+			EncryptedMetadataEncryptedKey: req.EncryptedMetadataEncryptedKey,
+			EncryptedMetadataNonce:        nonce,
+		}
+		if !expiresAt.IsZero() {
+			opts.ExpiresAt = &expiresAt
+		}
+
+		object, err = endpoint.metabase.BeginObjectNextVersion(ctx, opts)
+		if err != nil {
+			return nil, endpoint.convertMetabaseErr(err)
+		}
 	}
 
 	satStreamID, err := endpoint.packStreamID(ctx, &internalpb.StreamID{
@@ -171,6 +182,7 @@ func (endpoint *Endpoint) BeginObject(ctx context.Context, req *pb.ObjectBeginRe
 		EncryptionParameters: req.EncryptionParameters,
 		Placement:            int32(bucket.Placement),
 		Versioned:            bucket.Versioning == buckets.VersioningEnabled,
+		MultipartUpload:      multipartUpload,
 	})
 	if err != nil {
 		endpoint.log.Error("internal", zap.Error(err))
@@ -264,15 +276,27 @@ func (endpoint *Endpoint) CommitObject(ctx context.Context, req *pb.ObjectCommit
 		return nil, rpcstatus.Error(rpcstatus.Internal, "unable to parse stream id")
 	}
 
-	// for old uplinks get Encryption from StreamMeta
-	streamMeta := &pb.StreamMeta{}
 	encryption := storj.EncryptionParameters{}
-	err = pb.Unmarshal(req.EncryptedMetadata, streamMeta)
-	if err != nil {
-		// TODO: what if this is an error we don't expect?
-	} else {
-		encryption.CipherSuite = storj.CipherSuite(streamMeta.EncryptionType)
-		encryption.BlockSize = streamMeta.EncryptionBlockSize
+	if streamID.EncryptionParameters != nil {
+		encryption.CipherSuite = storj.CipherSuite(streamID.EncryptionParameters.CipherSuite)
+		encryption.BlockSize = int32(streamID.EncryptionParameters.BlockSize)
+	}
+
+	streamMeta := &pb.StreamMeta{}
+	if encryption.CipherSuite == storj.EncUnspecified {
+		// for old uplinks get Encryption from StreamMeta
+		err = pb.Unmarshal(req.EncryptedMetadata, streamMeta)
+		if err != nil {
+			// TODO: what if this is an error we don't expect?
+		} else {
+			encryption.CipherSuite = storj.CipherSuite(streamMeta.EncryptionType)
+			encryption.BlockSize = streamMeta.EncryptionBlockSize
+		}
+	}
+
+	var expiresAt *time.Time
+	if !streamID.ExpirationDate.IsZero() {
+		expiresAt = &streamID.ExpirationDate
 	}
 
 	request := metabase.CommitObject{
@@ -284,6 +308,7 @@ func (endpoint *Endpoint) CommitObject(ctx context.Context, req *pb.ObjectCommit
 			Version:    metabase.Version(streamID.Version),
 		},
 		Encryption: encryption,
+		ExpiresAt:  expiresAt,
 
 		DisallowDelete: !allowDelete,
 
@@ -980,7 +1005,7 @@ func (endpoint *Endpoint) ListObjects(ctx context.Context, req *pb.ObjectListReq
 			}, func(ctx context.Context, it metabase.ObjectsIterator) error {
 				entry := metabase.ObjectEntry{}
 				for len(resp.Items) < limit && it.Next(ctx, &entry) {
-					item, err := endpoint.objectEntryToProtoListItem(ctx, req.Bucket, entry, prefix, includeSystemMetadata, includeCustomMetadata, bucket.Placement, bucket.Versioning == buckets.VersioningEnabled)
+					item, err := endpoint.objectEntryToProtoListItem(ctx, req.Bucket, entry, prefix, includeSystemMetadata, includeCustomMetadata, bucket.Placement, bucket.Versioning == buckets.VersioningEnabled, true)
 					if err != nil {
 						return err
 					}
@@ -1014,7 +1039,7 @@ func (endpoint *Endpoint) ListObjects(ctx context.Context, req *pb.ObjectListReq
 				}, func(ctx context.Context, it metabase.ObjectsIterator) error {
 					entry := metabase.ObjectEntry{}
 					for len(resp.Items) < limit && it.Next(ctx, &entry) {
-						item, err := endpoint.objectEntryToProtoListItem(ctx, req.Bucket, entry, prefix, includeSystemMetadata, includeCustomMetadata, bucket.Placement, bucket.Versioning == buckets.VersioningEnabled)
+						item, err := endpoint.objectEntryToProtoListItem(ctx, req.Bucket, entry, prefix, includeSystemMetadata, includeCustomMetadata, bucket.Placement, bucket.Versioning == buckets.VersioningEnabled, true)
 						if err != nil {
 							return err
 						}
@@ -1051,7 +1076,7 @@ func (endpoint *Endpoint) ListObjects(ctx context.Context, req *pb.ObjectListReq
 			}
 
 			for _, entry := range result.Objects {
-				item, err := endpoint.objectEntryToProtoListItem(ctx, req.Bucket, entry, prefix, includeSystemMetadata, includeCustomMetadata, bucket.Placement, bucket.Versioning == buckets.VersioningEnabled)
+				item, err := endpoint.objectEntryToProtoListItem(ctx, req.Bucket, entry, prefix, includeSystemMetadata, includeCustomMetadata, bucket.Placement, bucket.Versioning == buckets.VersioningEnabled, true)
 				if err != nil {
 					return nil, endpoint.convertMetabaseErr(err)
 				}
@@ -1078,7 +1103,7 @@ func (endpoint *Endpoint) ListObjects(ctx context.Context, req *pb.ObjectListReq
 			}, func(ctx context.Context, it metabase.ObjectsIterator) error {
 				entry := metabase.ObjectEntry{}
 				for len(resp.Items) < limit && it.Next(ctx, &entry) {
-					item, err := endpoint.objectEntryToProtoListItem(ctx, req.Bucket, entry, prefix, includeSystemMetadata, includeCustomMetadata, bucket.Placement, bucket.Versioning == buckets.VersioningEnabled)
+					item, err := endpoint.objectEntryToProtoListItem(ctx, req.Bucket, entry, prefix, includeSystemMetadata, includeCustomMetadata, bucket.Placement, bucket.Versioning == buckets.VersioningEnabled, false)
 					if err != nil {
 						return err
 					}
@@ -1164,7 +1189,7 @@ func (endpoint *Endpoint) ListPendingObjectStreams(ctx context.Context, req *pb.
 		options, func(ctx context.Context, it metabase.ObjectsIterator) error {
 			entry := metabase.ObjectEntry{}
 			for it.Next(ctx, &entry) {
-				item, err := endpoint.objectEntryToProtoListItem(ctx, req.Bucket, entry, "", true, true, bucket.Placement, bucket.Versioning == buckets.VersioningEnabled)
+				item, err := endpoint.objectEntryToProtoListItem(ctx, req.Bucket, entry, "", true, true, bucket.Placement, bucket.Versioning == buckets.VersioningEnabled, true)
 				if err != nil {
 					return err
 				}
@@ -1566,7 +1591,7 @@ func (endpoint *Endpoint) objectToProto(ctx context.Context, object metabase.Obj
 
 func (endpoint *Endpoint) objectEntryToProtoListItem(ctx context.Context, bucket []byte,
 	entry metabase.ObjectEntry, prefixToPrependInSatStreamID metabase.ObjectKey,
-	includeSystem, includeMetadata bool, placement storj.PlacementConstraint, versioned bool) (item *pb.ObjectListItem, err error) {
+	includeSystem, includeMetadata bool, placement storj.PlacementConstraint, versioned, multipartUpload bool) (item *pb.ObjectListItem, err error) {
 
 	item = &pb.ObjectListItem{
 		EncryptedObjectKey: []byte(entry.ObjectKey),
@@ -1641,8 +1666,9 @@ func (endpoint *Endpoint) objectEntryToProtoListItem(ctx context.Context, bucket
 				CipherSuite: pb.CipherSuite(entry.Encryption.CipherSuite),
 				BlockSize:   int64(entry.Encryption.BlockSize),
 			},
-			Placement: int32(placement),
-			Versioned: versioned,
+			Placement:       int32(placement),
+			Versioned:       versioned,
+			MultipartUpload: multipartUpload,
 		})
 		if err != nil {
 			return nil, err

@@ -31,10 +31,10 @@ func calculateSpaceUsed(segmentSize int64, numberOfPieces int, rs storj.Redundan
 // BeginSegment begins segment uploading.
 func (endpoint *Endpoint) BeginSegment(ctx context.Context, req *pb.SegmentBeginRequest) (resp *pb.SegmentBeginResponse, err error) {
 	defer mon.Task()(&ctx)(&err)
-	return endpoint.beginSegment(ctx, req, false)
+	return endpoint.beginSegment(ctx, req, true)
 }
 
-func (endpoint *Endpoint) beginSegment(ctx context.Context, req *pb.SegmentBeginRequest, objectJustCreated bool) (resp *pb.SegmentBeginResponse, err error) {
+func (endpoint *Endpoint) beginSegment(ctx context.Context, req *pb.SegmentBeginRequest, multipartUpload bool) (resp *pb.SegmentBeginResponse, err error) {
 	defer mon.Task()(&ctx)(&err)
 
 	endpoint.versionCollector.collect(req.Header.UserAgent, mon.Func().ShortName())
@@ -128,7 +128,7 @@ func (endpoint *Endpoint) beginSegment(ctx context.Context, req *pb.SegmentBegin
 		},
 		RootPieceID:         rootPieceID,
 		Pieces:              pieces,
-		ObjectExistsChecked: objectJustCreated,
+		ObjectExistsChecked: !multipartUpload,
 	})
 	if err != nil {
 		return nil, endpoint.convertMetabaseErr(err)
@@ -383,6 +383,8 @@ func (endpoint *Endpoint) CommitSegment(ctx context.Context, req *pb.SegmentComm
 		Redundancy:  rs,
 		Pieces:      pieces,
 		Placement:   storj.PlacementConstraint(streamID.Placement),
+
+		MultipartUpload: streamID.MultipartUpload,
 	}
 
 	err = endpoint.validateRemoteSegment(ctx, mbCommitSegment, originalLimits)
@@ -498,6 +500,8 @@ func (endpoint *Endpoint) MakeInlineSegment(ctx context.Context, req *pb.Segment
 		EncryptedETag: req.EncryptedETag,
 
 		InlineData: req.EncryptedInlineData,
+
+		MultipartUpload: streamID.MultipartUpload,
 	})
 	if err != nil {
 		return nil, endpoint.convertMetabaseErr(err)
